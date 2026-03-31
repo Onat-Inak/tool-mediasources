@@ -164,6 +164,36 @@ cleanup() {
     exit "$exit_code"
 }
 
+mediamtx_listening() {
+    lsof -nP -iTCP:"$RTSP_PORT" -sTCP:LISTEN >/dev/null 2>&1
+}
+
+start_mediamtx() {
+    echo "🚀 Starting MediaMTX server..."
+    mediamtx "$SCRIPT_DIR/mediamtx.yml" >/tmp/mediamtx.log 2>&1 &
+    MTX_PID=$!
+    STARTED_MEDIAMTX=1
+
+    for _ in $(seq 1 50); do
+        if mediamtx_listening; then
+            return 0
+        fi
+        if ! kill -0 "$MTX_PID" 2>/dev/null; then
+            break
+        fi
+        sleep 0.1
+    done
+    return 1
+}
+
+collect_media_files() {
+    FILES=()
+    while IFS= read -r file; do
+        [[ -n "$file" ]] || continue
+        FILES+=("$file")
+    done < <(find "$MEDIA_DIR" -maxdepth 1 -type f -name "*.mp4" | sort)
+}
+
 # --------------------------
 # Main
 # --------------------------
@@ -171,17 +201,21 @@ install_ffmpeg
 install_mediamtx
 trap cleanup EXIT INT TERM
 
-# Start MediaMTX in background if not already running
-if ! pgrep -x mediamtx >/dev/null 2>&1; then
-    echo "🚀 Starting MediaMTX server..."
-    mediamtx ./mediamtx.yml >/tmp/mediamtx.log 2>&1 &
-    MTX_PID=$!
-    STARTED_MEDIAMTX=1
-    sleep 2
+# Start MediaMTX in background if not already listening
+if ! mediamtx_listening; then
+    if pgrep -x mediamtx >/dev/null 2>&1; then
+        echo "♻️ Clearing stale MediaMTX process..."
+        pkill -x mediamtx || true
+        sleep 1
+    fi
+    if ! start_mediamtx; then
+        echo "❌ MediaMTX failed to start. Check /tmp/mediamtx.log"
+        exit 1
+    fi
 fi
 
 # Confirm MediaMTX is actually listening on RTSP_PORT
-if ! lsof -i :"$RTSP_PORT" >/dev/null 2>&1; then
+if ! mediamtx_listening; then
     echo "❌ MediaMTX is not listening on port $RTSP_PORT. Check /tmp/mediamtx.log"
     exit 1
 fi
@@ -193,7 +227,7 @@ echo "✅ MediaMTX running on rtsp://$LOCAL_IP:$RTSP_PORT/"
 # Stream MP4 files in folder
 # --------------------------
 echo "📁 Scanning MP4 files in $MEDIA_DIR..."
-mapfile -t FILES < <(find "$MEDIA_DIR" -maxdepth 1 -type f -name "*.mp4" | sort)
+collect_media_files
 
 if [[ ${#FILES[@]} -eq 0 ]]; then
     echo "⚠️ No .mp4 files found in $MEDIA_DIR"
